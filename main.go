@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -15,9 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/glimesh/broadcast-box/internal/networktest"
-	"github.com/glimesh/broadcast-box/internal/webrtc"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/patrikrog/broadcast-box/internal/networktest"
+	"github.com/patrikrog/broadcast-box/internal/webrtc"
 )
 
 const (
@@ -30,6 +32,13 @@ const (
 )
 
 var errNoBuildDirectoryErr = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
+
+var (
+	dbPool *pgxpool.Pool
+	dbCtx context.Context
+	dbErr error
+)
+
 
 type (
 	whepLayerRequestJSON struct {
@@ -47,12 +56,23 @@ func validateStreamKey(streamKey string) bool {
 	return regexp.MustCompile(`^[a-zA-Z0-9_\-\.~]+$`).MatchString(streamKey)
 }
 
-func extractBearerToken(authHeader string) (string, bool) {
+func validateStreamer(token []string) (*webrtc.Streamer, bool) {
+	conn, err := dbPool.Acquire(dbCtx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	streamer, ok := webrtc.LookupStreamer(conn, dbCtx, token)
+	return streamer, ok
+}
+
+func extractBearerToken(authHeader string) ([]string, bool) {
 	const bearerPrefix = "Bearer "
 	if strings.HasPrefix(authHeader, bearerPrefix) {
-		return strings.TrimPrefix(authHeader, bearerPrefix), true
+		s := strings.Split(strings.TrimPrefix(authHeader, bearerPrefix), ";")
+		return s, true
 	}
-	return "", false
+	return nil, false
 }
 
 func whipHandler(res http.ResponseWriter, r *http.Request) {
@@ -66,9 +86,13 @@ func whipHandler(res http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamKey, ok := extractBearerToken(streamKeyHeader)
-	if !ok || !validateStreamKey(streamKey) {
-		logHTTPError(res, "Invalid stream key format", http.StatusBadRequest)
+	token, ok := extractBearerToken(streamKeyHeader)
+	if !ok || token == nil || !validateStreamKey(token[0]) {
+		logHTTPError(res, "Not a valid token", http.StatusBadRequest)
+	}
+	streamer, ok := validateStreamer(token)
+	if !ok || streamer == nil {
+		logHTTPError(res, "Not an authorized streamer", http.StatusForbidden)
 		return
 	}
 
@@ -78,7 +102,7 @@ func whipHandler(res http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := webrtc.WHIP(string(offer), streamKey)
+	answer, err := webrtc.WHIP(string(offer), streamer.StreamKey)
 	if err != nil {
 		logHTTPError(res, err.Error(), http.StatusBadRequest)
 		return
@@ -97,8 +121,8 @@ func whepHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	streamKey, ok := extractBearerToken(streamKeyHeader)
-	if !ok || !validateStreamKey(streamKey) {
+	token, ok := extractBearerToken(streamKeyHeader)
+	if !ok || !validateStreamKey(token[0]) {
 		logHTTPError(res, "Invalid stream key format", http.StatusBadRequest)
 		return
 	}
@@ -109,7 +133,7 @@ func whepHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	answer, whepSessionId, err := webrtc.WHEP(string(offer), streamKey)
+	answer, whepSessionId, err := webrtc.WHEP(string(offer), token[0])
 	if err != nil {
 		logHTTPError(res, err.Error(), http.StatusBadRequest)
 		return
@@ -229,6 +253,12 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	dbCtx = context.Background()
+	dbPool, dbErr = pgxpool.New(dbCtx, os.Getenv("POSTGRES_URL"))
+	if dbErr != nil {
+		log.Fatal(dbErr)
+	}
+	defer dbPool.Close()
 
 	webrtc.Configure()
 
