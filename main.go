@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,12 +32,9 @@ const (
 	networkTestFailedMessage  = "\033[0;31mNetwork Test failed.\n%s\nPlease see the README and join Discord for help\033[0m"
 )
 
-var errNoBuildDirectoryErr = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
-
 var (
+	errNoBuildDirectoryErr = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
 	dbPool *pgxpool.Pool
-	dbCtx context.Context
-	dbErr error
 )
 
 
@@ -54,16 +52,6 @@ func logHTTPError(w http.ResponseWriter, err string, code int) {
 
 func validateStreamKey(streamKey string) bool {
 	return regexp.MustCompile(`^[a-zA-Z0-9_\-\.~]+$`).MatchString(streamKey)
-}
-
-func validateStreamer(token []string) (*webrtc.Streamer, bool) {
-	conn, err := dbPool.Acquire(dbCtx)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	streamer, ok := webrtc.LookupStreamer(conn, dbCtx, token)
-	return streamer, ok
 }
 
 func extractBearerToken(authHeader string) ([]string, bool) {
@@ -90,8 +78,9 @@ func whipHandler(res http.ResponseWriter, r *http.Request) {
 	if !ok || token == nil || !validateStreamKey(token[0]) {
 		logHTTPError(res, "Not a valid token", http.StatusBadRequest)
 	}
-	streamer, ok := validateStreamer(token)
-	if !ok || streamer == nil {
+
+	streamer := webrtc.NewStreamer(dbPool, r.Context(), token)
+	if streamer == nil {
 		logHTTPError(res, "Not an authorized streamer", http.StatusForbidden)
 		return
 	}
@@ -102,7 +91,7 @@ func whipHandler(res http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := webrtc.WHIP(string(offer), streamer.StreamKey)
+	answer, err := webrtc.WHIP(string(offer), streamer)
 	if err != nil {
 		logHTTPError(res, err.Error(), http.StatusBadRequest)
 		return
@@ -185,9 +174,27 @@ func whepLayerHandler(res http.ResponseWriter, req *http.Request) {
 
 func statusHandler(res http.ResponseWriter, req *http.Request) {
 	res.Header().Add("Content-Type", "application/json")
+	streamKey := req.PathValue("streamkey")
 
-	if err := json.NewEncoder(res).Encode(webrtc.GetStreamStatuses()); err != nil {
+	if !validateStreamKey(streamKey) {
+		logHTTPError(res, "Invalid stream key format", http.StatusBadRequest)
+		return
+	}
+
+	streamKeys, err := webrtc.GetStreamKeys(dbPool, req.Context())
+	if err != nil {
+		logHTTPError(res, "Could not get stream keys", http.StatusBadRequest)
+		return
+	}
+
+
+	if !slices.Contains(streamKeys, streamKey) {
+		logHTTPError(res, "Stream does not exist", http.StatusNotFound)
+		return
+	}
+	if err := json.NewEncoder(res).Encode(webrtc.GetStreamStatus(streamKey)); err != nil {
 		logHTTPError(res, err.Error(), http.StatusBadRequest)
+		return
 	}
 }
 
@@ -253,10 +260,10 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	dbCtx = context.Background()
-	dbPool, dbErr = pgxpool.New(dbCtx, os.Getenv("POSTGRES_URL"))
-	if dbErr != nil {
-		log.Fatal(dbErr)
+	var err error
+	dbPool, err = pgxpool.New(context.Background(), os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		log.Fatal(err)
 	}
 	defer dbPool.Close()
 
@@ -297,16 +304,14 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	if os.Getenv("DISABLE_FRONTEND") == "" {
-		mux.Handle("/", indexHTMLWhenNotFound(http.Dir("./web/build")))
-	}
+	mux.HandleFunc("/api/status/{streamkey}", corsHandler(statusHandler))
 	mux.HandleFunc("/api/whip", corsHandler(whipHandler))
 	mux.HandleFunc("/api/whep", corsHandler(whepHandler))
 	mux.HandleFunc("/api/sse/", corsHandler(whepServerSentEventsHandler))
 	mux.HandleFunc("/api/layer/", corsHandler(whepLayerHandler))
 
-	if os.Getenv("DISABLE_STATUS") == "" {
-		mux.HandleFunc("/api/status", corsHandler(statusHandler))
+	if os.Getenv("DISABLE_FRONTEND") == "" {
+		mux.Handle("/", indexHTMLWhenNotFound(http.Dir("./web/build")))
 	}
 
 	server := &http.Server{

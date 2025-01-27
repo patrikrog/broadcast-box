@@ -139,7 +139,7 @@ func videoWriter(remoteTrack *webrtc.TrackRemote, stream *stream, peerConnection
 	}
 }
 
-func WHIP(offer, streamKey string) (string, error) {
+func WHIP(offer string, streamer *Streamer) (string, error) {
 	maybePrintOfferAnswer(offer, true)
 
 	peerConnection, err := newPeerConnection(apiWhip)
@@ -149,7 +149,7 @@ func WHIP(offer, streamKey string) (string, error) {
 
 	streamMapLock.Lock()
 	defer streamMapLock.Unlock()
-	stream, err := getStream(streamKey, true)
+	stream, err := getStream(streamer, streamer.StreamKey, true)
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +168,7 @@ func WHIP(offer, streamKey string) (string, error) {
 			if err := peerConnection.Close(); err != nil {
 				log.Println(err)
 			}
-			peerConnectionDisconnected(streamKey, "")
+			peerConnectionDisconnected(streamer.StreamKey, "")
 		}
 	})
 

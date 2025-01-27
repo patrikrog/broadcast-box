@@ -51,6 +51,7 @@ type (
 
 		whepSessionsLock sync.RWMutex
 		whepSessions     map[string]*whepSession
+		streamer		*Streamer
 	}
 
 	videoTrack struct {
@@ -89,7 +90,7 @@ func getVideoTrackCodec(in string) videoTrackCodec {
 	return 0
 }
 
-func getStream(streamKey string, forWHIP bool) (*stream, error) {
+func getStream(streamer *Streamer, streamKey string, forWHIP bool) (*stream, error) {
 	foundStream, ok := streamMap[streamKey]
 	if !ok {
 		audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
@@ -106,12 +107,14 @@ func getStream(streamKey string, forWHIP bool) (*stream, error) {
 			whipActiveContext:       whipActiveContext,
 			whipActiveContextCancel: whipActiveContextCancel,
 			firstSeenEpoch:          uint64(time.Now().Unix()),
+			streamer:				 streamer,
 		}
 		streamMap[streamKey] = foundStream
 	}
 
 	if forWHIP {
 		foundStream.hasWHIPClient.Store(true)
+		streamMap[streamKey].streamer = streamer
 	}
 
 	return foundStream, nil
@@ -134,6 +137,7 @@ func peerConnectionDisconnected(streamKey string, whepSessionId string) {
 	} else {
 		stream.hasWHIPClient.Store(false)
 		stream.videoTracks = nil
+		stream.streamer = nil
 	}
 
 	// Only delete stream if all WHEP Sessions are gone and have no WHIP Client
@@ -423,7 +427,7 @@ type StreamStatusVideo struct {
 }
 
 type StreamStatus struct {
-	StreamKey            string              `json:"streamKey"`
+	Streamer			 string				 `json:"streamer"`
 	FirstSeenEpoch       uint64              `json:"firstSeenEpoch"`
 	AudioPacketsReceived uint64              `json:"audioPacketsReceived"`
 	VideoStreams         []StreamStatusVideo `json:"videoStreams"`
@@ -438,53 +442,59 @@ type whepSessionStatus struct {
 	PacketsWritten uint64 `json:"packetsWritten"`
 }
 
-func GetStreamStatuses() []StreamStatus {
+func GetStreamStatus(streamKey string) StreamStatus {
 	streamMapLock.Lock()
 	defer streamMapLock.Unlock()
 
-	out := []StreamStatus{}
+	if streamMap[streamKey] == nil {
+		return StreamStatus{}
+	}
 
-	for streamKey, stream := range streamMap {
-		whepSessions := []whepSessionStatus{}
-		stream.whepSessionsLock.Lock()
-		for id, whepSession := range stream.whepSessions {
-			currentLayer, ok := whepSession.currentLayer.Load().(string)
-			if !ok {
-				continue
-			}
+	stream := streamMap[streamKey]
 
-			whepSessions = append(whepSessions, whepSessionStatus{
-				ID:             id,
-				CurrentLayer:   currentLayer,
-				SequenceNumber: whepSession.sequenceNumber,
-				Timestamp:      whepSession.timestamp,
-				PacketsWritten: whepSession.packetsWritten,
-			})
-		}
-		stream.whepSessionsLock.Unlock()
+	streamerName := ""
+	if stream.streamer != nil {
+		streamerName = stream.streamer.Name
+	}
 
-		streamStatusVideo := []StreamStatusVideo{}
-		for _, videoTrack := range stream.videoTracks {
-			var lastKeyFrameSeen time.Time
-			if v, ok := videoTrack.lastKeyFrameSeen.Load().(time.Time); ok {
-				lastKeyFrameSeen = v
-			}
-
-			streamStatusVideo = append(streamStatusVideo, StreamStatusVideo{
-				RID:              videoTrack.rid,
-				PacketsReceived:  videoTrack.packetsReceived.Load(),
-				LastKeyFrameSeen: lastKeyFrameSeen,
-			})
+	whepSessions := []whepSessionStatus{}
+	stream.whepSessionsLock.Lock()
+	for id, whepSession := range stream.whepSessions {
+		currentLayer, ok := whepSession.currentLayer.Load().(string)
+		if !ok {
+			continue
 		}
 
-		out = append(out, StreamStatus{
-			StreamKey:            streamKey,
-			FirstSeenEpoch:       stream.firstSeenEpoch,
-			AudioPacketsReceived: stream.audioPacketsReceived.Load(),
-			VideoStreams:         streamStatusVideo,
-			WHEPSessions:         whepSessions,
+		whepSessions = append(whepSessions, whepSessionStatus{
+			ID:             id,
+			CurrentLayer:   currentLayer,
+			SequenceNumber: whepSession.sequenceNumber,
+			Timestamp:      whepSession.timestamp,
+			PacketsWritten: whepSession.packetsWritten,
+		})
+	}
+	stream.whepSessionsLock.Unlock()
+
+	streamStatusVideo := []StreamStatusVideo{}
+	for _, videoTrack := range stream.videoTracks {
+		var lastKeyFrameSeen time.Time
+		if v, ok := videoTrack.lastKeyFrameSeen.Load().(time.Time); ok {
+			lastKeyFrameSeen = v
+		}
+
+		streamStatusVideo = append(streamStatusVideo, StreamStatusVideo{
+			RID:              videoTrack.rid,
+			PacketsReceived:  videoTrack.packetsReceived.Load(),
+			LastKeyFrameSeen: lastKeyFrameSeen,
 		})
 	}
 
-	return out
+	return StreamStatus{
+		Streamer:			  streamerName,
+		FirstSeenEpoch:       stream.firstSeenEpoch,
+		AudioPacketsReceived: stream.audioPacketsReceived.Load(),
+		VideoStreams:         streamStatusVideo,
+		WHEPSessions:         whepSessions,
+	}
+
 }

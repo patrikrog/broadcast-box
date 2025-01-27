@@ -78,7 +78,7 @@ func WHEP(offer, streamKey string) (string, string, error) {
 
 	streamMapLock.Lock()
 	defer streamMapLock.Unlock()
-	stream, err := getStream(streamKey, false)
+	stream, err := getStream(nil, streamKey, false)
 	if err != nil {
 		return "", "", err
 	}
