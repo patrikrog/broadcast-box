@@ -4,13 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -32,10 +30,7 @@ const (
 	networkTestFailedMessage  = "\033[0;31mNetwork Test failed.\n%s\nPlease see the README and join Discord for help\033[0m"
 )
 
-var (
-	errNoBuildDirectoryErr = errors.New("\033[0;31mBuild directory does not exist, run `npm install` and `npm run build` in the web directory.\033[0m")
-	dbPool *pgxpool.Pool
-)
+var dbPool *pgxpool.Pool
 
 
 type (
@@ -198,20 +193,6 @@ func statusHandler(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func indexHTMLWhenNotFound(fs http.FileSystem) http.Handler {
-	fileServer := http.FileServer(fs)
-
-	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		_, err := fs.Open(path.Clean(req.URL.Path)) // Do not allow path traversals.
-		if errors.Is(err, os.ErrNotExist) {
-			http.ServeFile(resp, req, "./web/build/index.html")
-
-			return
-		}
-		fileServer.ServeHTTP(resp, req)
-	})
-}
-
 func corsHandler(next func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(res http.ResponseWriter, req *http.Request) {
 		res.Header().Set("Access-Control-Allow-Origin", "*")
@@ -234,10 +215,6 @@ func main() {
 			log.Println("Loading `" + envFileProd + "`")
 			if err := godotenv.Load(envFileProd); err != nil {
 				return err
-			}
-
-			if _, err := os.Stat("./web/build"); os.IsNotExist(err) && os.Getenv("DISABLE_FRONTEND") == "" {
-				return errNoBuildDirectoryErr
 			}
 
 			return nil
@@ -309,10 +286,6 @@ func main() {
 	mux.HandleFunc("/api/whep", corsHandler(whepHandler))
 	mux.HandleFunc("/api/sse/", corsHandler(whepServerSentEventsHandler))
 	mux.HandleFunc("/api/layer/", corsHandler(whepLayerHandler))
-
-	if os.Getenv("DISABLE_FRONTEND") == "" {
-		mux.Handle("/", indexHTMLWhenNotFound(http.Dir("./web/build")))
-	}
 
 	server := &http.Server{
 		Handler: mux,
