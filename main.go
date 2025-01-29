@@ -167,6 +167,21 @@ func whepLayerHandler(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func streamsHandler(res http.ResponseWriter, req *http.Request) {
+	res.Header().Add("Content-Type", "application/json")
+
+	streamKeys, err := webrtc.GetStreamKeys(dbPool, req.Context())
+	if err != nil {
+		logHTTPError(res, "Could not get stream keys", http.StatusBadRequest)
+		return
+	}
+
+	if err := json.NewEncoder(res).Encode(streamKeys); err != nil {
+		logHTTPError(res, err.Error(), http.StatusBadRequest)
+		return
+	}
+}
+
 func statusHandler(res http.ResponseWriter, req *http.Request) {
 	res.Header().Add("Content-Type", "application/json")
 	streamKey := req.PathValue("streamkey")
@@ -281,6 +296,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/streams", corsHandler(streamsHandler))
 	mux.HandleFunc("/api/status/{streamkey}", corsHandler(statusHandler))
 	mux.HandleFunc("/api/whip", corsHandler(whipHandler))
 	mux.HandleFunc("/api/whep", corsHandler(whepHandler))
